@@ -6,10 +6,17 @@ STOCKFISH_PATH = "/home/nick/Downloads/stockfish-ubuntu-x86-64-avx2/stockfish/st
 
 
 
-def engine(moves, depth=20, lines=1):
-	
-	print('Depth:', depth)
-	print('Lines:', lines)
+def engine(moves, move=None, depth=25, lines=1):
+
+	moves_parts = [item for item in moves.split(' ') if item]
+	is_white = len(moves_parts) % 2 == 0
+	#print('Parts', moves_parts)
+	#if is_white:
+	#	print('Whites move!')
+	#else:
+	#	print('Blacks move!')
+	#print('Depth:', depth)
+	#print('Lines:', lines)
 	# Start Stockfish process
 	process = subprocess.Popen(
 		STOCKFISH_PATH,
@@ -24,7 +31,8 @@ def engine(moves, depth=20, lines=1):
 		'isready',           # Check if engine is ready
 		f'position startpos moves {moves}', # Set starting position
 		f'setoption name MultiPV value {lines}', # How many lines
-		f'go depth {depth}'        # Search to depth 15
+		f'setoption name Threads value 1', # How many lines
+		f'go depth {depth} searchmoves {move}' if move else f'go depth {depth}'        # Search to depth 15
 	]
 	# Send commands and collect output
 	for cmd in commands:
@@ -56,13 +64,13 @@ def engine(moves, depth=20, lines=1):
 			if 'cp' not in parts or 'pv' not in parts:
 				continue
 			score = int(parts[parts.index('cp') + 1]) / 100.0
+			if not is_white:
+				score = -score
 			move = parts[parts.index('pv') + 1]
-			a = move[:2]
-			b = move[2:4]
 			results.append({
 				'score': score,
-				'start': a,
-				'end': b
+				'move': move,
+				'line': ' '.join([moves, move]).strip()
 			})
 
 	# What if i dont get what i expect
@@ -80,9 +88,11 @@ def engine(moves, depth=20, lines=1):
 if __name__ == '__main__':
 	t = time.time()
 	# Run commands and get output
-	moves = engine('', depth=16, lines=10)
+	moves = engine('e2e4', lines=3)
 	for line in moves:
 		print(line)
+		#eval = engine('', move='a2a4')
+		#	print(eval)
 
 	print(time.time() - t)
 

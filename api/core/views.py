@@ -1,23 +1,27 @@
-from ninja import Field, NinjaAPI, Schema
+from os import stat
+import time
+from ninja import NinjaAPI, Schema
 from core.engine import engine
-from core.models import Line, Move, Opening
+from core.models import Line, Opening, Position
+from django.db.models.functions import Length
+
 
 api = NinjaAPI()
 
 
-#class MoveSchema(Schema):
-#	start: str = Field(alias='from')
-#	end:   str = Field(alias='to')
-#	score: float
 
 
+
+
+#---------------
+#	Openings
+#---------------
 
 
 
 class OpeningSchema(Schema):
 	is_white: bool
 	slug: str
-
 
 class OpeningInput(Schema):
 	is_white: bool
@@ -31,89 +35,206 @@ def post_openings(request, data: OpeningInput):
 	return opening
 
 
+
 @api.get('/openings', response=list[OpeningSchema])
 def get_openings(request):
 	return Opening.objects.all()
 
 
+
 @api.delete('/openings/{slug}')
 def delete_openings(request, slug: str):
+	Opening.objects.filter(slug=slug).delete()
+	Line.objects.filter(slug=slug).delete()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#----------------------
+#	Moves/Positions
+#----------------------
+
+
+
+class MoveSchema(Schema):
+	score: float
+	move: str
+	has_line: bool
+
+	@staticmethod
+	def resolve_move(obj):
+		parts = [item for item in obj.line.split(' ') if item]
+		return parts[-1]
+
+	@staticmethod
+	def resolve_has_line(obj, context):
+		slug = context.get('slug')
+		line = Line.objects.filter(slug=slug, line__startswith=obj.line).first()
+		print('context', context, obj)
+		#return False
+		return not not line
+
+class MovesSchema(Schema):
+	active: bool
+	next: str
+	options: list[MoveSchema]
+
+
+
+@api.get('/moves',
+	#response=MovesSchema
+)
+def get_moves(request, line: str = '', slug: str = ''):
+	line = line.strip()
+	slug = slug.strip()
+	
+	t = time.time()
+
+	# Fixture out if next move is for white or black
+	line_parts = [item for item in line.split(' ') if item]
+	is_white = len(line_parts) % 2 == 0
+
+	# Is the move for the active player
+	active = False
 	opening = Opening.objects.filter(slug=slug).first()
 	if opening:
-		opening.delete()
+		if opening.is_white and is_white:
+			active = True
+		if not opening.is_white and not is_white:
+			active = True
 
-
-
-
-
-
-
-def serizlaize_move(move):
-	string = move.line + ' ' + move.start + move.end
-	line = Line.objects.filter(line__startswith=string).first()
-	return {
-		'from': move.start,
-		'to': move.end,
-		'score': float(move.score),
-		'has_line': not not line
-	}
-
-@api.get('/best')
-def get_best(request, line: str = ''):
-	line = line.strip()
-	move = Move.objects.filter(line=line, type='best').first()
-	if not move:
-		results = engine(line, depth=25)
-		if not results:
-			return
-		result = results[0]
-		move = Move.objects.create(
-			line=line,
-			start=result['start'],
-			end=result['end'],
-			score=result['score'],
-			type='best'
+	# Load options
+	if not line:
+		options = Position.objects.annotate(length=Length('line')).filter(
+			length=4
 		)
-	return serizlaize_move(move)
-
-
-
-
-
-def serizlaize_moves(moves):
-	return [serizlaize_move(move) for move in moves]
-
-@api.get('/candidates')
-def get_candidates(request, line: str = ''):
-	line = line.strip()
-	moves = Move.objects.filter(line=line, type='candidate')
-	if not moves:
-		results = engine(line, depth=18, lines=10)
-		if not results:
-			return
-		moves = []
+	else:
+		options = Position.objects.annotate(length=Length('line')).filter(
+			line__startswith=line,
+			length=len(line) + 5
+		)
+	
+	# Generate positions/scores if not found
+	if not options:
+		options = []
+		results = engine(line, lines=3)
 		for result in results:
-			move = Move.objects.create(
-				line=line,
-				start=result['start'],
-				end=result['end'],
-				score=result['score'],
-				type='candidate'
-			)
-			moves.append(move)
-	return serizlaize_moves(moves)
+			l = result.get('line')
+			position = Position.objects.filter(line=l).first()
+			if not position:
+				position = Position.objects.create(
+					score=result.get('score'),
+					line=l,
+				)
+			options.append(position)
+	
+	# Sort options by score
+	options = sorted(options, key=lambda move: move.score)
+	if is_white:
+		options.reverse()
+
+	print(f'Duration: {time.time() - t:.1f}')
+
+	
+	# Get active players next move
+	next = ''
+	if active:
+		next_line = Line.objects.annotate(length=Length('line')).filter(
+			slug=slug,
+			line__startswith=line,
+			length__gt=len(line)
+		).first()
+		if next_line:
+			l = next_line.line[len(line):]
+			l = l.strip()
+			l = l.split(' ')
+			next = l[0]
+
+
+	data = MovesSchema.model_validate({
+		'active': active,
+		'next': next,
+		'options': options
+	}, context={'slug': slug})
+
+	# Return packet
+	return data
+
+
+
+@api.get('/eval',
+)
+def get_eval(request, line: str = ''):
+	line = line.strip()
+	
+	# Look for position
+	position = Position.objects.filter(line=line).first()
+	if position:
+		return float(position.score)
+
+	# Generate missing position
+	results = engine(line, lines=1)
+	if results:
+		result = results[0]
+		position = Position.objects.create(
+			score=result.get('score'),
+			line=line,
+		)
+		return float(position.score)
+
+	return 0
 
 
 
 
 
-class SaveInput(Schema):
+
+
+
+
+
+
+
+
+
+
+
+#------------
+#	Lines
+#------------
+
+
+
+class LineSchema(Schema):
+	id: int
+	line: str
+	san: str
+
+@api.get('/lines', response=list[LineSchema])
+def get_lines(request, line: str = '', slug: str = ''):
+	line = line.strip()
+	lines = Line.objects.filter(line__startswith=line, slug=slug)
+	return lines.order_by('line')
+
+
+
+class LineInput(Schema):
 	slug: str
 	line: str
 	san: str
 
-@api.post('/save')
-def post_save(request, data: SaveInput):
+@api.post('/lines')
+def post_lines(request, data:LineInput):
 	slug = data.slug.strip()
 	line = data.line.strip()
 	san = data.san.strip()
@@ -139,43 +260,15 @@ def post_save(request, data: SaveInput):
 
 
 
-
-
-
-class LineSchema(Schema):
-	line: str
-	san: str
-
-@api.get('/lines', response=list[LineSchema])
-def get_lines(request, line: str = '', slug: str = ''):
-	line = line.strip()
-	lines = Line.objects.filter(line__startswith=line, slug=slug)
-	return lines.order_by('line')
+@api.delete('/lines/{id}')
+def delete_lines(request, id: int):
+	line = Line.objects.filter(id=id).first()
+	if line:
+		line.delete()
 
 
 
 
-
-
-
-@api.get('/valid')
-def get_lines(request, line: str = '', slug: str = ''):
-	line = line.strip()
-	line_parts = line.split(' ')
-	prefix = []
-	for i in range(len(line_parts)):
-		if i % 2 == 0:
-			pre = ' '.join(prefix)
-			# Look for lines that match prefix
-			lines_prefix = Line.objects.filter(line__startswith=pre, slug=slug)
-			# Look for lines with prefix + whites next move and compare sizes
-			pre_move = ' '.join(prefix + [line_parts[i]])
-			lines_prefix_move = Line.objects.filter(line__startswith=pre_move, slug=slug)
-			# If they are the same, its valid, if its different its invalid
-			if len(lines_prefix) != len(lines_prefix_move):
-				return False
-		prefix.append(line_parts[i])
-	return True
 
 
 
